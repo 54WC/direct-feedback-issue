@@ -10,14 +10,13 @@ from __future__ import division
 from pydrake.all import (BasicVector, DiagramBuilder, FloatingBaseType,
                          LinearQuadraticRegulator, RigidBodyPlant,
                          RigidBodyTree, Simulator)
-from inertial_wheel_pendulum import *
+                         
+#from inertial_wheel_pendulum import rigid_body_tree
 import math
 import numpy as np
 from IPython.display import HTML
 from inertial_wheel_pendulum_visualizer import *
 import matplotlib.pyplot as plt
-
-
 
 # Make numpy printing prettier
 np.set_printoptions(precision=3, suppress=True)

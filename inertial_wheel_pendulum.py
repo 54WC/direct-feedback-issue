@@ -6,8 +6,13 @@ from pydrake.all import (
     Simulator,
     SignalLogger,
     VectorSystem,
-    LeafSystem
+    BasicVector,
+    LeafSystem,
+    PortDataType
     )
+
+from pydrake.attic.multibody.rigid_body_tree import *
+
 
 # Define a system to calculate the continuous dynamics
 # of the inertial wheel pendulum.
@@ -16,15 +21,20 @@ from pydrake.all import (
 # of the system, in terms of the center of mass of 
 # the first link (m1 centered at l1) and the second
 # link (m2 centered at l2, with radius r).
-class InertialWheelPendulum(VectorSystem):
+class InertialWheelPendulum(LeafSystem):   #(VectorSystem)
     def __init__(self, m1 = 1., l1 = 1., 
                        m2 = 2., l2 = 2., r = 1.0,
                        g = 10., input_max = 10.):
-        VectorSystem.__init__(self,
-            1,                           # One input (torque at reaction wheel).
-            4)                           # Four outputs (theta, phi, dtheta, dphi)
-        self._DeclareContinuousState(4)  # Four states (theta, phi, dtheta, dphi).
-
+        #VectorSystem.__init__(self,
+        #   1,                           # One input (torque at reaction wheel).
+        #   4)                           # Four outputs (theta, phi, dtheta, dphi)
+        
+        LeafSystem.__init__(self)
+        # One inputs
+        self.DeclareVectorInputPort("u",BasicVector(1))
+        # Four outputs (full state)
+        self.DeclareVectorOutputPort("y",BasicVector(4),self.CopyStateOut,prerequisites_of_calc=set([self.all_state_ticket()]))   #self.CopyStateOut,
+        self.DeclareContinuousState(4)  # Four states (theta, phi, dtheta, dphi).
         self.m1 = float(m1)
         self.l1 = float(l1)
         self.m2 = float(m2)
@@ -83,31 +93,70 @@ class InertialWheelPendulum(VectorSystem):
 
         return np.hstack([qd, qdd])
 
+    def DoCalcTimeDerivatives(self, context, derivatives):
+        # We shouldn't get into a situation where this is
+        # necessary... if so, it'll save us time if we just
+        # break the simulation.
+        x = context.get_continuous_state_vector().CopyToVector()
+        u = self.EvalVectorInput(context, 0).CopyToVector()
+        if abs(u) > 1E3:
+            raise ValueError("Input torque was excessive and would lead"
+            " to a really slow simulation. Lower your gains and make sure"
+            " your system is stable!")
 
+        theta = x[0]
+        theta_dot = x[1]
+        t = context.get_time()
+        base_position = self.C * math.sin(self.w * context.get_time())
+
+
+        torque_from_point_mass = \
+              -self.m * self.l * self.g * math.sin(theta)
+        torque_from_damping = -self.b * theta_dot
+        accel_from_base_acceleration = \
+            - 1. / self.l * self.w**2 * base_position * math.cos(theta)
+
+        theta_ddot = accel_from_base_acceleration + \
+            (torque_from_damping + torque_from_point_mass + u) / (self.m * self.l**2)
+        #print('theta_dot',theta_dot)
+        #print('theta_dot',theta_ddot)
+        #xdot[0] = theta_dot
+        #xdot[1] = theta_ddot
+        derivatives.get_mutable_vector().SetFromVector([theta_dot, theta_ddot])
+
+    #np.concatenate((theta_dot, theta_ddot), axis=1))
     # This method calculates the time derivative of the state,
     # which allows the system to be simulated forward in time.
-    def _DoCalcVectorTimeDerivatives(self, context, u, x, xdot):
+    def DoCalcTimeDerivatives(self, context, derivatives):
+        x = context.get_continuous_state_vector().CopyToVector()
+        u = self.EvalVectorInput(context, 0).CopyToVector()
         q = x[0:2]
         qd = x[2:4]
-        
-        xdot[:] = self.evaluate_f(u, x, throw_when_limits_exceeded=True)
+        #xdot[:] = self.evaluate_f(u, x, throw_when_limits_exceeded=True)
+        derivatives.get_mutable_vector().SetFromVector(self.evaluate_f(u, x, throw_when_limits_exceeded=True))
 
     # This method calculates the output of the system
     # (i.e. those things that are visible downstream of
     # this system) from the state. In this case, it
     # copies out the full state.
-    def _DoCalcVectorOutput(self, context, u, x, y):
+    def DoCalcVectorOutput(self, context, u, x, y):
         y[:] = x
-
+    
+    def CopyStateOut(self, context, output):
+        x = context.get_continuous_state_vector().CopyToVector()
+        y = output.SetFromVector(x)
+            #y = output.SetFromVector(x)
+    
     # The Drake simulation backend is very careful to avoid
     # algebraic loops when systems are connected in feedback.
     # This system does not feed its inputs directly to its
     # outputs (the output is only a function of the state),
     # so we can safely tell the simulator that we don't have
     # any direct feedthrough.
+    
     def _DoHasDirectFeedthrough(self, input_port, output_port):
         if input_port == 0 and output_port == 0:
-            return False
+           return False
         else:
             # For other combinations of i/o, we will return
             # "None", i.e. "I don't know."
@@ -139,23 +188,22 @@ class InertialWheelPendulum(VectorSystem):
 
 class PendulumController(VectorSystem):
     ''' System to control the pendulum. Must be handed
-    a function with signature:
+        a function with signature:
         u = f(t, x)
-    that computes control inputs for the pendulum. '''
-
+        that computes control inputs for the pendulum. '''
+    
     def __init__(self, feedback_rule):
         VectorSystem.__init__(self,
-            4,                           # Four inputs: full state inertial wheel pendulum..
-            1)                           # One output (torque for reaction wheel).
+                              4,                           # Four inputs: full state inertial wheel pendulum..
+                              1)                           # One output (torque for reaction wheel).
         self.feedback_rule = feedback_rule
-
+    
     # This method calculates the output of the system from the
     # input by applying the supplied feedback rule.
-    def _DoCalcVectorOutput(self, context, u, x, y):
+    def DoCalcVectorOutput(self, context, u, x, y):
         # Remember that the input "u" of the controller is the
         # state of the plant
         y[:] = self.feedback_rule(u)
-
 
 def RunSimulation(pendulum_plant, control_law, x0=np.random.random((4, 1)), duration=30):
     pendulum_controller = PendulumController(control_law)
@@ -173,16 +221,17 @@ def RunSimulation(pendulum_plant, control_law, x0=np.random.random((4, 1)), dura
         g = pendulum_plant.g, 
         input_max = pendulum_plant.input_max))
     controller = builder.AddSystem(pendulum_controller)
+    
     builder.Connect(plant.get_output_port(0), controller.get_input_port(0))
     builder.Connect(controller.get_output_port(0), plant.get_input_port(0))
     
     # Create a logger to capture the simulation of our plant
     input_log = builder.AddSystem(SignalLogger(1))
-    input_log._DeclarePeriodicPublish(0.033333, 0.0)
+    input_log.DeclarePeriodicPublish(0.033333, 0.0)
     builder.Connect(controller.get_output_port(0), input_log.get_input_port(0))
 
     state_log = builder.AddSystem(SignalLogger(4))
-    state_log._DeclarePeriodicPublish(0.033333, 0.0)
+    state_log.DeclarePeriodicPublish(0.033333, 0.0)
     builder.Connect(plant.get_output_port(0), state_log.get_input_port(0))
 
     diagram = builder.Build()
